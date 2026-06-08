@@ -6,13 +6,6 @@ import unicodedata
 from io import BytesIO
 from openpyxl import load_workbook
 
-# =====================================================================================
-#  GARDE-FOU PMU — Validation du naming builder avant upload GCP
-#  - Valide la structure + la cohérence (vs onglets de référence Sites / Advertiser / LPS)
-#  - Corrige automatiquement les URL (espaces / caractères spéciaux) en préservant les UTM
-#  - Affiche un rapport précis (erreurs bloquantes + corrections URL appliquées)
-#  - Si aucune erreur bloquante : régénère le MÊME fichier (URLs corrigées) téléchargeable
-# =====================================================================================
 
 # ---- Constantes de structure du fichier PMU ----
 SHEET_MAIN = "fichier_media"
@@ -36,11 +29,6 @@ META_ROWS = {
 }
 
 
-# =====================================================================================
-#  LOGIQUE URL SPÉCIFIQUE PMU
-#  Règle : on nettoie UNIQUEMENT les valeurs des paramètres utm_* (avant ET après le #).
-#  On ne touche à RIEN d'autre : redirectionUrl (déjà encodé), structure, fragment, etc.
-#  Nettoyage des valeurs utm : espaces -> _, accents retirés, caractères spéciaux -> _.
 # =====================================================================================
 _UTM_KEYS = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"}
 # Caractères considérés "spéciaux" à remplacer par _ dans une valeur utm
@@ -394,7 +382,7 @@ def regenerate_clean_file(uploaded_bytes, df_corrected):
 #  INTERFACE STREAMLIT
 # =====================================================================================
 st.set_page_config(page_title=" APP Streamlit PMU", page_icon="🛡️", layout="wide")
-st.title("Validation du fichier média PMU avant GCS")
+st.title("Validation du fichier média PMU avant GCP")
 st.caption("Validez le naming builder PMU avant l'upload GCP. Les URL sont corrigées automatiquement, le reste doit être corrigé à la main si erreur.")
 
 uploaded_file = st.file_uploader("Dépose le fichier média PMU (naming builder)", type=["xlsx"])
