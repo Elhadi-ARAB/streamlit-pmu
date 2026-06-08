@@ -6,6 +6,13 @@ import unicodedata
 from io import BytesIO
 from openpyxl import load_workbook
 
+# =====================================================================================
+#  GARDE-FOU PMU — Validation du naming builder avant upload GCP
+#  - Valide la structure + la cohérence (vs onglets de référence Sites / Advertiser / LPS)
+#  - Corrige automatiquement les URL (espaces / caractères spéciaux) en préservant les UTM
+#  - Affiche un rapport précis (erreurs bloquantes + corrections URL appliquées)
+#  - Si aucune erreur bloquante : régénère le MÊME fichier (URLs corrigées) téléchargeable
+# =====================================================================================
 
 # ---- Constantes de structure du fichier PMU ----
 SHEET_MAIN = "fichier_media"
@@ -29,6 +36,11 @@ META_ROWS = {
 }
 
 
+# =====================================================================================
+#  LOGIQUE URL SPÉCIFIQUE PMU
+#  Règle : on nettoie UNIQUEMENT les valeurs des paramètres utm_* (avant ET après le #).
+#  On ne touche à RIEN d'autre : redirectionUrl (déjà encodé), structure, fragment, etc.
+#  Nettoyage des valeurs utm : espaces -> _, accents retirés, caractères spéciaux -> _.
 # =====================================================================================
 _UTM_KEYS = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"}
 # Caractères considérés "spéciaux" à remplacer par _ dans une valeur utm
@@ -381,7 +393,7 @@ def regenerate_clean_file(uploaded_bytes, df_corrected):
 # =====================================================================================
 #  INTERFACE STREAMLIT
 # =====================================================================================
-st.set_page_config(page_title=" APP Streamlit PMU", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="app streamlit PMU", page_icon="🛡️", layout="wide")
 st.title("Validation du fichier média PMU avant GCP")
 st.caption("Validez le naming builder PMU avant l'upload GCP. Les URL sont corrigées automatiquement, le reste doit être corrigé à la main si erreur.")
 
@@ -436,10 +448,20 @@ if uploaded_file is not None:
                 st.subheader("✅ Validation réussie")
                 st.success("Aucune erreur bloquante. Le fichier propre est prêt à être uploadé sur GCP.")
                 clean_io = regenerate_clean_file(uploaded_bytes, df_corrected)
+
+                # Nom du fichier basé sur le Nom de campagne CM (cellule B8)
+                camp_name = raw_df.iloc[7, META_COL_VALUE] if raw_df.shape[0] > 7 else None
+                if pd.isna(camp_name) or str(camp_name).strip() == "":
+                    out_name = uploaded_file.name.replace(".xlsx", "_VALIDE.xlsx")
+                else:
+                    safe = re.sub(r'[\\/:*?"<>|]+', "_", str(camp_name).strip())
+                    safe = re.sub(r"\s+", "_", safe)
+                    out_name = f"{safe}.xlsx"
+
                 st.download_button(
                     label="📥 Télécharger le fichier propre",
                     data=clean_io,
-                    file_name=uploaded_file.name.replace(".xlsx", "_VALIDE.xlsx"),
+                    file_name=out_name,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
