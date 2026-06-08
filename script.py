@@ -363,21 +363,27 @@ def process_urls(df):
 def regenerate_clean_file(uploaded_bytes, df_corrected):
     """
     Réécrit le fichier d'origine en ne modifiant QUE la colonne URL de l'onglet
-    fichier_media. Tous les autres onglets et la mise en forme sont conservés.
+    fichier_media, et en figeant les VALEURS des formules.
+
+    IMPORTANT : les colonnes 'PLACEMENT NAME DCM', 'Créative DCM', 'URL avec les utms'
+    sont des formules Excel. openpyxl ne recalcule pas les formules : si on réécrit
+    le fichier tel quel, ces cellules ressortent vides côté backend (cm-file-gen),
+    ce qui déclenche des erreurs. On ouvre donc en data_only=True pour récupérer les
+    dernières valeurs calculées par Excel et les figer en valeurs statiques.
     """
-    wb = load_workbook(BytesIO(uploaded_bytes))
+    # data_only=True -> on lit les valeurs calculées (cache Excel), pas les formules
+    wb = load_workbook(BytesIO(uploaded_bytes), data_only=True)
     ws = wb[SHEET_MAIN]
 
-    # Retrouver l'index de colonne (1-indexé openpyxl) de la colonne URL via la ligne d'en-tête
     header_row_xl = HEADER_ROW + 1  # openpyxl est 1-indexé
     url_col_idx = None
     for cell in ws[header_row_xl]:
-        if str(cell.value).strip() == URL_COLUMN:
+        if cell.value is not None and str(cell.value).strip() == URL_COLUMN:
             url_col_idx = cell.column
             break
 
+    # Mettre à jour la colonne URL avec les valeurs corrigées
     if url_col_idx is not None:
-        # Les données commencent juste après l'en-tête
         for i, (_, row) in enumerate(df_corrected.iterrows()):
             xl_row = header_row_xl + 1 + i
             val = row.get(URL_COLUMN)
@@ -393,8 +399,8 @@ def regenerate_clean_file(uploaded_bytes, df_corrected):
 # =====================================================================================
 #  INTERFACE STREAMLIT
 # =====================================================================================
-st.set_page_config(page_title="app streamlit PMU", page_icon="🛡️", layout="wide")
-st.title("Validation du fichier média PMU avant GCP")
+st.set_page_config(page_title="Garde-fou PMU", page_icon="🛡️", layout="wide")
+st.title("🛡️ Garde-fou PMU — Validation du fichier média")
 st.caption("Validez le naming builder PMU avant l'upload GCP. Les URL sont corrigées automatiquement, le reste doit être corrigé à la main si erreur.")
 
 uploaded_file = st.file_uploader("Dépose le fichier média PMU (naming builder)", type=["xlsx"])
