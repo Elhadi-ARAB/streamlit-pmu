@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import os
 import re
 import urllib.parse
 import unicodedata
@@ -397,79 +398,270 @@ def regenerate_clean_file(uploaded_bytes, df_corrected):
 
 
 # =====================================================================================
+#  RENOMMAGE DES CRÉAS PAR DIMENSION (matching sur Format des lignes RD)
+# =====================================================================================
+import zipfile
+import struct
+
+CREATIVE_NAME_COL = "Créative DCM"
+FORMAT_COL = "Format"
+TRACKING_COL = "Type de Tracking"
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".gif"}
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".avi"}
+
+
+def get_image_dimensions(file_bytes):
+    """Retourne (width, height) d'une image via Pillow, ou None si échec."""
+    try:
+        from PIL import Image
+        img = Image.open(BytesIO(file_bytes))
+        return img.size  # (width, height)
+    except Exception:
+        return None
+
+
+def get_mp4_dimensions(file_bytes):
+    """
+    Détection légère des dimensions d'un mp4 en parsant l'atome 'tkhd'.
+    Best-effort : renvoie (w, h) ou None (alors renommage manuel).
+    """
+    try:
+        data = file_bytes
+        idx = data.find(b'tkhd')
+        if idx == -1:
+            return None
+        # L'atome tkhd : après le nom, version(1)+flags(3), puis selon version
+        start = idx + 4
+        version = data[start]
+        # offset jusqu'à la matrice + width/height (width/height sont les 8 derniers octets de tkhd, en 16.16 fixed)
+        # tkhd v0 : taille fixe ; width/height sont les 2 derniers uint32 (fixed point 16.16)
+        # On lit les 8 derniers octets de l'atome tkhd
+        # Trouver la taille de l'atome (4 octets avant 'tkhd')
+        size = struct.unpack('>I', data[idx-4:idx])[0]
+        atom_start = idx - 4
+        atom_end = atom_start + size
+        w_fixed = struct.unpack('>I', data[atom_end-8:atom_end-4])[0]
+        h_fixed = struct.unpack('>I', data[atom_end-4:atom_end])[0]
+        w = w_fixed >> 16
+        h = h_fixed >> 16
+        if w > 0 and h > 0:
+            return (w, h)
+        return None
+    except Exception:
+        return None
+
+
+def build_format_index(df):
+    """
+    Construit un index {(w,h) -> [Créative DCM, ...]} à partir des lignes RD du builder.
+    Un même format peut avoir PLUSIEURS créas (une par support) : on les garde toutes.
+    Ignore les lignes PCC (pas de créa).
+    """
+    index = {}
+    if CREATIVE_NAME_COL not in df.columns or FORMAT_COL not in df.columns:
+        return index
+
+    for _, row in df.iterrows():
+        tracking = str(row.get(TRACKING_COL, "")).strip().upper()
+        if tracking != "RD":
+            continue  # on ignore PCC et autres
+        fmt = row.get(FORMAT_COL)
+        crea = row.get(CREATIVE_NAME_COL)
+        if pd.isna(fmt) or pd.isna(crea):
+            continue
+        m = re.match(r"^\s*(\d{1,4})\s*[xX]\s*(\d{1,4})\s*$", str(fmt))
+        if not m:
+            continue
+        key = (int(m.group(1)), int(m.group(2)))
+        crea_name = str(crea).strip()
+        index.setdefault(key, [])
+        if crea_name not in index[key]:  # évite les doublons exacts de nom
+            index[key].append(crea_name)
+    return index
+
+
+def rename_creatives(files, df):
+    """
+    files : liste de tuples (filename, bytes)
+    Une image d'un format donné est DUPLIQUÉE en une créa par ligne RD de ce format
+    (un nom par support).
+    Retourne : (zip_bytes, matched, not_found, manual)
+      - matched : [(ancien_nom, [nouveaux_noms], dimension)]
+      - not_found : [(nom, dimension)] dimension absente du builder
+      - manual : [(nom, raison)] dimension non détectée
+    """
+    index = build_format_index(df)
+    matched, not_found, manual = [], [], []
+
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname, fbytes in files:
+            ext = os.path.splitext(fname)[1].lower()
+
+            if ext in IMG_EXTS:
+                dims = get_image_dimensions(fbytes)
+            elif ext in VIDEO_EXTS:
+                dims = get_mp4_dimensions(fbytes)
+            else:
+                manual.append((fname, f"extension {ext} non gérée"))
+                continue
+
+            if dims is None:
+                manual.append((fname, "dimension non détectée (à renommer à la main)"))
+                continue
+
+            if dims in index:
+                new_names = []
+                for crea_base in index[dims]:
+                    new_name = f"{crea_base}{ext}"
+                    zf.writestr(new_name, fbytes)   # une copie par support
+                    new_names.append(new_name)
+                matched.append((fname, new_names, f"{dims[0]}x{dims[1]}"))
+            else:
+                not_found.append((fname, f"{dims[0]}x{dims[1]}"))
+
+    zip_buffer.seek(0)
+    return zip_buffer, matched, not_found, manual
+
+
+# =====================================================================================
 #  INTERFACE STREAMLIT
 # =====================================================================================
 st.set_page_config(page_title="Garde-fou PMU", page_icon="🛡️", layout="wide")
-st.title("🛡️ Garde-fou PMU — Validation du fichier média")
-st.caption("Validez le naming builder PMU avant l'upload GCP. Les URL sont corrigées automatiquement, le reste doit être corrigé à la main si erreur.")
+st.title("🛡️ Garde-fou PMU")
 
-uploaded_file = st.file_uploader("Dépose le fichier média PMU (naming builder)", type=["xlsx"])
+tab_valid, tab_rename = st.tabs(["✅ Validation fichier média", "🖼️ Renommage des créas"])
 
-if uploaded_file is not None:
-    uploaded_bytes = uploaded_file.getvalue()
-    try:
-        xls = pd.ExcelFile(BytesIO(uploaded_bytes))
+with tab_valid:
+    st.caption("Validez le naming builder PMU avant l'upload GCP. Les URL sont corrigées automatiquement, le reste doit être corrigé à la main si erreur.")
 
-        if SHEET_MAIN not in xls.sheet_names:
-            st.error(f"❌ L'onglet '{SHEET_MAIN}' est introuvable dans le fichier.")
-            st.stop()
+    uploaded_file = st.file_uploader("Dépose le fichier média PMU (naming builder)", type=["xlsx"])
 
-        raw_df = pd.read_excel(xls, sheet_name=SHEET_MAIN, header=None)
-        df = pd.read_excel(xls, sheet_name=SHEET_MAIN, skiprows=HEADER_ROW)
-        df = df.dropna(how="all").reset_index(drop=True)
+    if uploaded_file is not None:
+        uploaded_bytes = uploaded_file.getvalue()
+        try:
+            xls = pd.ExcelFile(BytesIO(uploaded_bytes))
 
-        ref = load_reference_values(xls)
+            if SHEET_MAIN not in xls.sheet_names:
+                st.error(f"❌ L'onglet '{SHEET_MAIN}' est introuvable dans le fichier.")
+                st.stop()
 
-        st.success(f"✅ Fichier chargé — {len(df)} ligne(s) de données détectée(s).")
+            raw_df = pd.read_excel(xls, sheet_name=SHEET_MAIN, header=None)
+            df = pd.read_excel(xls, sheet_name=SHEET_MAIN, skiprows=HEADER_ROW)
+            df = df.dropna(how="all").reset_index(drop=True)
 
-        if st.button("🔍 Valider le fichier"):
-            header_errors = validate_headers(df)
-            meta_errors, _ = validate_metadata(raw_df, ref)
-            row_errors = validate_rows(df, ref)
-            df_corrected, url_report = process_urls(df)
+            ref = load_reference_values(xls)
 
-            all_errors = header_errors + meta_errors + row_errors
+            st.success(f"✅ Fichier chargé — {len(df)} ligne(s) de données détectée(s).")
 
-            # ---- Rapport des corrections URL (informatif, non bloquant) ----
-            if url_report:
-                st.subheader("🔧 Corrections d'URL appliquées")
-                st.caption("Ces corrections sont automatiques. Vérifie qu'elles te conviennent.")
-                for r in url_report:
-                    with st.expander(f"Ligne {r['ligne']} — {', '.join(r['modifs'])}"):
-                        st.markdown("**Avant :**")
-                        st.code(r["avant"], language="text")
-                        st.markdown("**Après :**")
-                        st.code(r["apres"], language="text")
-            else:
-                st.info("ℹ️ Aucune correction d'URL nécessaire — les URL étaient déjà propres.")
+            if st.button("🔍 Valider le fichier"):
+                header_errors = validate_headers(df)
+                meta_errors, _ = validate_metadata(raw_df, ref)
+                row_errors = validate_rows(df, ref)
+                df_corrected, url_report = process_urls(df)
 
-            # ---- Erreurs bloquantes ----
-            if all_errors:
-                st.subheader("❌ Erreurs à corriger")
-                st.error(f"{len(all_errors)} erreur(s) bloquante(s). Corrige le fichier source puis recharge-le.")
-                for e in all_errors:
-                    st.markdown(f"- {e}")
-                st.warning("🚫 Aucun fichier propre généré tant que les erreurs ne sont pas corrigées.")
-            else:
-                st.subheader("✅ Validation réussie")
-                st.success("Aucune erreur bloquante. Le fichier propre est prêt à être uploadé sur GCP.")
-                clean_io = regenerate_clean_file(uploaded_bytes, df_corrected)
+                all_errors = header_errors + meta_errors + row_errors
 
-                # Nom du fichier basé sur le Nom de campagne CM (cellule B8)
-                camp_name = raw_df.iloc[7, META_COL_VALUE] if raw_df.shape[0] > 7 else None
-                if pd.isna(camp_name) or str(camp_name).strip() == "":
-                    out_name = uploaded_file.name.replace(".xlsx", "_VALIDE.xlsx")
+                # ---- Rapport des corrections URL (informatif, non bloquant) ----
+                if url_report:
+                    st.subheader("🔧 Corrections d'URL appliquées")
+                    st.caption("Ces corrections sont automatiques. Vérifie qu'elles te conviennent.")
+                    for r in url_report:
+                        with st.expander(f"Ligne {r['ligne']} — {', '.join(r['modifs'])}"):
+                            st.markdown("**Avant :**")
+                            st.code(r["avant"], language="text")
+                            st.markdown("**Après :**")
+                            st.code(r["apres"], language="text")
                 else:
-                    safe = re.sub(r'[\\/:*?"<>|]+', "_", str(camp_name).strip())
-                    safe = re.sub(r"\s+", "_", safe)
-                    out_name = f"{safe}.xlsx"
+                    st.info("ℹ️ Aucune correction d'URL nécessaire — les URL étaient déjà propres.")
 
-                st.download_button(
-                    label="📥 Télécharger le fichier propre",
-                    data=clean_io,
-                    file_name=out_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+                # ---- Erreurs bloquantes ----
+                if all_errors:
+                    st.subheader("❌ Erreurs à corriger")
+                    st.error(f"{len(all_errors)} erreur(s) bloquante(s). Corrige le fichier source puis recharge-le.")
+                    for e in all_errors:
+                        st.markdown(f"- {e}")
+                    st.warning("🚫 Aucun fichier propre généré tant que les erreurs ne sont pas corrigées.")
+                else:
+                    st.subheader("✅ Validation réussie")
+                    st.success("Aucune erreur bloquante. Le fichier propre est prêt à être uploadé sur GCP.")
+                    clean_io = regenerate_clean_file(uploaded_bytes, df_corrected)
 
-    except Exception as e:
-        st.error(f"❌ Erreur lors du traitement du fichier : {e}")
+                    # Nom du fichier basé sur le Nom de campagne CM (cellule B8)
+                    camp_name = raw_df.iloc[7, META_COL_VALUE] if raw_df.shape[0] > 7 else None
+                    if pd.isna(camp_name) or str(camp_name).strip() == "":
+                        out_name = uploaded_file.name.replace(".xlsx", "_VALIDE.xlsx")
+                    else:
+                        safe = re.sub(r'[\\/:*?"<>|]+', "_", str(camp_name).strip())
+                        safe = re.sub(r"\s+", "_", safe)
+                        out_name = f"{safe}.xlsx"
+
+                    st.download_button(
+                        label="📥 Télécharger le fichier propre",
+                        data=clean_io,
+                        file_name=out_name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+
+        except Exception as e:
+            st.error(f"❌ Erreur lors du traitement du fichier : {e}")
+
+
+with tab_rename:
+    st.caption("Renomme automatiquement les créas selon la colonne 'Créative DCM', en détectant la dimension de chaque image. Les lignes PCC sont ignorées (pas de créa).")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        builder_file = st.file_uploader("1) Fichier média (builder validé)", type=["xlsx"], key="rename_builder")
+    with col2:
+        crea_files = st.file_uploader(
+            "2) Créas reçues (jpg, png, gif, mp4)",
+            type=["jpg", "jpeg", "png", "gif", "mp4", "mov", "webm", "avi"],
+            accept_multiple_files=True,
+            key="rename_creas",
+        )
+
+    if builder_file is not None and crea_files:
+        try:
+            xls_b = pd.ExcelFile(BytesIO(builder_file.getvalue()))
+            if SHEET_MAIN not in xls_b.sheet_names:
+                st.error(f"❌ L'onglet '{SHEET_MAIN}' est introuvable dans le builder.")
+                st.stop()
+            df_b = pd.read_excel(xls_b, sheet_name=SHEET_MAIN, skiprows=HEADER_ROW)
+            df_b = df_b.dropna(how="all").reset_index(drop=True)
+
+            if st.button("🔁 Renommer les créas"):
+                files = [(f.name, f.getvalue()) for f in crea_files]
+                zip_buffer, matched, not_found, manual = rename_creatives(files, df_b)
+
+                if matched:
+                    total_out = sum(len(nn) for _, nn, _ in matched)
+                    st.subheader(f"✅ {len(matched)} créa(s) reçue(s) → {total_out} fichier(s) généré(s)")
+                    for old, new_names, dim in matched:
+                        st.markdown(f"- `{old}` ({dim}) → **{len(new_names)}** copie(s) :")
+                        for nn in new_names:
+                            st.markdown(f"    - {nn}")
+
+                if not_found:
+                    st.subheader("❌ Dimensions absentes du fichier Excel")
+                    st.error("Ces créas ont une dimension qui n'existe dans aucune ligne RD du builder (vérifie s'il manque une ligne) :")
+                    for name, dim in not_found:
+                        st.markdown(f"- `{name}` → dimension **{dim}** introuvable dans l'Excel")
+
+                if manual:
+                    st.subheader("✋ À renommer à la main")
+                    for name, reason in manual:
+                        st.markdown(f"- `{name}` → {reason}")
+
+                if matched:
+                    st.download_button(
+                        label="📥 Télécharger les créas renommées (ZIP)",
+                        data=zip_buffer,
+                        file_name="creas_renommees.zip",
+                        mime="application/zip",
+                    )
+                else:
+                    st.info("Aucune créa renommée — rien à télécharger.")
+
+        except Exception as e:
+            st.error(f"❌ Erreur lors du renommage : {e}")
