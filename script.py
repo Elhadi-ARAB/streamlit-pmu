@@ -7,13 +7,6 @@ import unicodedata
 from io import BytesIO
 from openpyxl import load_workbook
 
-# =====================================================================================
-#  GARDE-FOU PMU — Validation du naming builder avant upload GCP
-#  - Valide la structure + la cohérence (vs onglets de référence Sites / Advertiser / LPS)
-#  - Corrige automatiquement les URL (espaces / caractères spéciaux) en préservant les UTM
-#  - Affiche un rapport précis (erreurs bloquantes + corrections URL appliquées)
-#  - Si aucune erreur bloquante : régénère le MÊME fichier (URLs corrigées) téléchargeable
-# =====================================================================================
 
 # ---- Constantes de structure du fichier PMU ----
 SHEET_MAIN = "fichier_media"
@@ -530,7 +523,7 @@ def rename_creatives(files, df):
 st.set_page_config(page_title="Garde-fou PMU", page_icon="🛡️", layout="wide")
 st.title("🛡️ Garde-fou PMU")
 
-tab_valid, tab_rename = st.tabs(["✅ Validation fichier média", "🖼️ Renommage des créas"])
+tab_valid, tab_rename = st.tabs([" Validation fichier média", " Renommage des créas ( img )"])
 
 with tab_valid:
     st.caption("Validez le naming builder PMU avant l'upload GCP. Les URL sont corrigées automatiquement, le reste doit être corrigé à la main si erreur.")
