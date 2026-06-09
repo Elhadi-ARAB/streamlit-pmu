@@ -520,8 +520,8 @@ def rename_creatives(files, df):
 # =====================================================================================
 #  INTERFACE STREAMLIT
 # =====================================================================================
-st.set_page_config(page_title="Garde-fou PMU", page_icon="🛡️", layout="wide")
-st.title("🛡️ Garde-fou PMU")
+st.set_page_config(page_title=" app streamlit automation PMU", page_icon="🛡️", layout="wide")
+st.title("🛡️ app streamlit automation PMU")
 
 tab_valid, tab_rename = st.tabs([" Validation fichier média", " Renommage des créas ( img )"])
 
